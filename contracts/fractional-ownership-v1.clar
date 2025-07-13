@@ -87,6 +87,16 @@
   (and (> proposal-id u0) (<= proposal-id (var-get proposal-count)))
 )
 
+;; Validates string input to prevent empty or malicious strings
+(define-private (is-valid-string (input (string-ascii 128)))
+  (and (> (len input) u0) (<= (len input) u128))
+)
+
+;; Validates description input to prevent empty or malicious strings
+(define-private (is-valid-description (input (string-ascii 512)))
+  (and (> (len input) u0) (<= (len input) u512))
+)
+
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Public: Administrative Functions
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -170,11 +180,15 @@
 (define-public (create-proposal (title (string-ascii 128)) (description (string-ascii 512)) (voting-duration uint))
   (let ((proposal-id (+ u1 (var-get proposal-count))))
     (asserts! (var-get property-initialized) ERR-PROPERTY-NOT-INITIALIZED)
+    (asserts! (is-valid-string title) ERR-INVALID-SHARE-TOTAL)
+    (asserts! (is-valid-description description) ERR-INVALID-SHARE-TOTAL)
     (asserts! (is-valid-voting-duration voting-duration) ERR-INVALID-VOTING-DURATION)
-    (let ((validated-end-block (+ block-height voting-duration)))
+    (let ((validated-end-block (+ block-height voting-duration))
+          (validated-title title)
+          (validated-description description))
       (map-set proposals proposal-id {
-        title: title,
-        description: description,
+        title: validated-title,
+        description: validated-description,
         end-block: validated-end-block,
         votes-for: u0,
         votes-against: u0,
