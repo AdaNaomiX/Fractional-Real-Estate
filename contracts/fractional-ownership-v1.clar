@@ -18,6 +18,17 @@
 (define-constant ERR-INSUFFICIENT-FUNDS (err u107))
 (define-constant ERR-NOTHING-TO-DISTRIBUTE (err u108))
 (define-constant ERR-ALREADY-INITIALIZED (err u200))
+(define-constant ERR-INVALID-VALUATION (err u201))
+(define-constant ERR-INVALID-VOTING-DURATION (err u202))
+(define-constant ERR-INVALID-PROPOSAL-ID (err u203))
+
+;; Input validation constants
+(define-constant MAX-SHARES u10000)
+(define-constant MIN-SHARES u1)
+(define-constant MAX-VALUATION u1000000000000) ;; 1 trillion STX
+(define-constant MIN-VALUATION u1000000) ;; 1 million STX
+(define-constant MAX-VOTING-DURATION u52560) ;; ~1 year in blocks
+(define-constant MIN-VOTING-DURATION u144) ;; ~1 day in blocks
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Data Variables and Maps
@@ -56,6 +67,26 @@
   (is-eq tx-sender CONTRACT-OWNER)
 )
 
+;; Validates property valuation input
+(define-private (is-valid-valuation (valuation uint))
+  (and (>= valuation MIN-VALUATION) (<= valuation MAX-VALUATION))
+)
+
+;; Validates share count input
+(define-private (is-valid-shares (shares uint))
+  (and (>= shares MIN-SHARES) (<= shares MAX-SHARES))
+)
+
+;; Validates voting duration input
+(define-private (is-valid-voting-duration (duration uint))
+  (and (>= duration MIN-VOTING-DURATION) (<= duration MAX-VOTING-DURATION))
+)
+
+;; Validates proposal ID input
+(define-private (is-valid-proposal-id (proposal-id uint))
+  (and (> proposal-id u0) (<= proposal-id (var-get proposal-count)))
+)
+
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Public: Administrative Functions
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -68,7 +99,8 @@
   (begin
     (asserts! (is-owner) ERR-UNAUTHORIZED)
     (asserts! (not (var-get property-initialized)) ERR-ALREADY-INITIALIZED)
-    (asserts! (> shares u0) ERR-INVALID-SHARE-TOTAL)
+    (asserts! (is-valid-valuation valuation) ERR-INVALID-VALUATION)
+    (asserts! (is-valid-shares shares) ERR-INVALID-SHARE-TOTAL)
     (var-set property-initialized true)
     (var-set property-valuation valuation)
     (var-set total-shares shares)
@@ -138,16 +170,19 @@
 (define-public (create-proposal (title (string-ascii 128)) (description (string-ascii 512)) (voting-duration uint))
   (let ((proposal-id (+ u1 (var-get proposal-count))))
     (asserts! (var-get property-initialized) ERR-PROPERTY-NOT-INITIALIZED)
-    (map-set proposals proposal-id {
-      title: title,
-      description: description,
-      end-block: (+ block-height voting-duration),
-      votes-for: u0,
-      votes-against: u0,
-      executed: false
-    })
-    (var-set proposal-count proposal-id)
-    (ok proposal-id)
+    (asserts! (is-valid-voting-duration voting-duration) ERR-INVALID-VOTING-DURATION)
+    (let ((validated-end-block (+ block-height voting-duration)))
+      (map-set proposals proposal-id {
+        title: title,
+        description: description,
+        end-block: validated-end-block,
+        votes-for: u0,
+        votes-against: u0,
+        executed: false
+      })
+      (var-set proposal-count proposal-id)
+      (ok proposal-id)
+    )
   )
 )
 
@@ -157,6 +192,7 @@
 ;; @returns (response bool uint)
 (define-public (vote-on-proposal (proposal-id uint) (in-favor bool))
   (let ((proposal-result (map-get? proposals proposal-id)))
+    (asserts! (is-valid-proposal-id proposal-id) ERR-INVALID-PROPOSAL-ID)
     (match proposal-result
       proposal
       (begin
@@ -221,4 +257,10 @@
 ;; @returns (optional principal)
 (define-read-only (get-share-owner (share-id uint))
   (nft-get-owner? ownership-share share-id)
+)
+
+;; @desc Gets the current proposal count
+;; @returns uint
+(define-read-only (get-proposal-count)
+  (var-get proposal-count)
 )
