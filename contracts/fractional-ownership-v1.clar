@@ -17,6 +17,7 @@
 (define-constant ERR-SHARES-ALREADY-MINTED (err u106))
 (define-constant ERR-INSUFFICIENT-FUNDS (err u107))
 (define-constant ERR-NOTHING-TO-DISTRIBUTE (err u108))
+(define-constant ERR-ALREADY-INITIALIZED (err u200))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Data Variables and Maps
@@ -29,7 +30,7 @@
 (define-data-var shares-minted bool false)
 
 ;; Fungible Token for Rental Income
-(define-fungible-token rental-income u0)
+(define-fungible-token rental-income)
 
 ;; Non-Fungible Token for Ownership Shares
 (define-non-fungible-token ownership-share uint)
@@ -43,7 +44,7 @@
   votes-against: uint,
   executed: bool
 })
-(define-map voter-proposals (tuple principal uint) bool)
+(define-map voter-proposals {voter: principal, proposal-id: uint} bool)
 (define-data-var proposal-count uint u0)
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -66,7 +67,7 @@
 (define-public (initialize-property (valuation uint) (shares uint))
   (begin
     (asserts! (is-owner) ERR-UNAUTHORIZED)
-    (asserts! (not (var-get property-initialized)) (err u200)) ;; ERR-ALREADY-INITIALIZED
+    (asserts! (not (var-get property-initialized)) ERR-ALREADY-INITIALIZED)
     (asserts! (> shares u0) ERR-INVALID-SHARE-TOTAL)
     (var-set property-initialized true)
     (var-set property-valuation valuation)
@@ -90,15 +91,15 @@
 )
 
 ;; @desc Deposits rental income (in STX) into the contract for later distribution
+;; @param amount: The amount of STX to deposit
 ;; @returns (response bool uint)
-(define-public (deposit-rental-income)
+(define-public (deposit-rental-income (amount uint))
   (begin
-    (asserts! (> (stx-get-balance tx-sender) u0) ERR-INSUFFICIENT-FUNDS)
-    (let ((amount (stx-get-balance tx-sender)))
-      (try! (ft-mint? rental-income amount (as-contract tx-sender)))
-      (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
-      (ok true)
-    )
+    (asserts! (> amount u0) ERR-INSUFFICIENT-FUNDS)
+    (asserts! (>= (stx-get-balance tx-sender) amount) ERR-INSUFFICIENT-FUNDS)
+    (try! (ft-mint? rental-income amount (as-contract tx-sender)))
+    (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+    (ok true)
   )
 )
 
@@ -109,13 +110,17 @@
     (asserts! (> contract-balance u0) ERR-NOTHING-TO-DISTRIBUTE)
     (let
       ((total (var-get total-shares))
-       (owner (unwrap! (nft-get-owner? ownership-share total) (panic ERR-PROPERTY-NOT-INITIALIZED))))
-      (if (is-eq (as-contract tx-sender) owner)
-          (ok false) ;; Cannot distribute if contract holds all shares
-          (let ((payout (/ (* contract-balance u10000) total)))
-            (try! (stx-transfer? (/ (* payout total) u10000) (as-contract tx-sender) owner))
-            (ok true)
-          )
+       (owner-result (nft-get-owner? ownership-share total)))
+      (match owner-result
+        owner-principal
+        (if (is-eq (as-contract tx-sender) owner-principal)
+            (ok false) ;; Cannot distribute if contract holds all shares
+            (let ((payout (/ contract-balance total)))
+              (try! (as-contract (stx-transfer? payout tx-sender owner-principal)))
+              (ok true)
+            )
+        )
+        ERR-PROPERTY-NOT-INITIALIZED
       )
     )
   )
@@ -148,20 +153,26 @@
 
 ;; @desc Allows a shareholder to cast a vote on a proposal
 ;; @param proposal-id: The ID of the proposal to vote on
-;; @param vote: A boolean value (true for 'for', false for 'against')
+;; @param in-favor: A boolean value (true for 'for', false for 'against')
 ;; @returns (response bool uint)
 (define-public (vote-on-proposal (proposal-id uint) (in-favor bool))
-  (let ((proposal (unwrap! (map-get? proposals proposal-id) ERR-PROPOSAL-NOT-FOUND)))
-    (asserts! (is-owner-of? ownership-share (var-get total-shares) tx-sender) ERR-UNAUTHORIZED)
-    (asserts! (is-none (map-get? voter-proposals (tuple tx-sender proposal-id))) ERR-ALREADY-VOTED)
-    (asserts! (<= block-height (get end-block proposal)) ERR-VOTING-CLOSED)
+  (let ((proposal-result (map-get? proposals proposal-id)))
+    (match proposal-result
+      proposal
+      (begin
+        (asserts! (is-some (nft-get-owner? ownership-share (var-get total-shares))) ERR-UNAUTHORIZED)
+        (asserts! (is-none (map-get? voter-proposals {voter: tx-sender, proposal-id: proposal-id})) ERR-ALREADY-VOTED)
+        (asserts! (<= block-height (get end-block proposal)) ERR-VOTING-CLOSED)
 
-    (let ((new-proposal (if in-favor
-                           (merge proposal { votes-for: (+ u1 (get votes-for proposal)) })
-                           (merge proposal { votes-against: (+ u1 (get votes-against proposal)) }))))
-      (map-set proposals proposal-id new-proposal)
-      (map-set voter-proposals (tuple tx-sender proposal-id) true)
-      (ok true)
+        (let ((new-proposal (if in-favor
+                               (merge proposal { votes-for: (+ u1 (get votes-for proposal)) })
+                               (merge proposal { votes-against: (+ u1 (get votes-against proposal)) }))))
+          (map-set proposals proposal-id new-proposal)
+          (map-set voter-proposals {voter: tx-sender, proposal-id: proposal-id} true)
+          (ok true)
+        )
+      )
+      ERR-PROPOSAL-NOT-FOUND
     )
   )
 )
@@ -171,7 +182,7 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 ;; @desc Gets the details of a specific property
-;; @returns (response object)
+;; @returns (response object uint)
 (define-read-only (get-property-details)
   (if (var-get property-initialized)
     (ok {
@@ -185,7 +196,7 @@
 
 ;; @desc Gets the details of a specific proposal
 ;; @param proposal-id: The ID of the proposal
-;; @returns (response object)
+;; @returns (optional object)
 (define-read-only (get-proposal-details (proposal-id uint))
   (map-get? proposals proposal-id)
 )
@@ -195,7 +206,7 @@
 ;; @param proposal-id: The ID of the proposal
 ;; @returns bool
 (define-read-only (has-voted (voter principal) (proposal-id uint))
-  (is-some (map-get? voter-proposals (tuple voter proposal-id)))
+  (is-some (map-get? voter-proposals {voter: voter, proposal-id: proposal-id}))
 )
 
 ;; @desc Gets the balance of rental income tokens for a principal
@@ -207,7 +218,7 @@
 
 ;; @desc Gets the owner of the specified share
 ;; @param share-id: The ID of the share NFT
-;; @returns (response principal uint)
+;; @returns (optional principal)
 (define-read-only (get-share-owner (share-id uint))
-  (ok (unwrap! (nft-get-owner? ownership-share share-id) (panic u0)))
+  (nft-get-owner? ownership-share share-id)
 )
